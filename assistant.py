@@ -8,6 +8,7 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from bank_common import decode_token
 
@@ -42,7 +43,7 @@ PRODUCTS = {"f1": "IBB", "f2": "QQQ", "f3": "VIG", "f4": "SPY", "f5": "XLK", "f6
 GUIDE_PATTERNS = (
     ("orders", r"\border\b|\borders\b|transfer status|track (?:a |my |the )?(?:transfer|payment)"),
     ("transactions", r"transaction|statement|account activity|payment history"),
-    ("holdings", r"holdings?|portfolio|my investments?"),
+    ("holdings", r"holdings?|my portfolio|portfolio holdings|portfolio balance|my investments?"),
     ("account", r"account|balance|balances"),
     ("transfer_in", r"add (?:money|funds)|fund (?:my |the )?account|deposit money"),
     ("schedule", r"schedul(?:e|ed|ing).*transfer|recurring transfer"),
@@ -66,8 +67,17 @@ def resolve_actions(suggestions, user_text, reply):
     """Resolve only known app destinations, with context-aware fallback suggestions."""
     actions = []
     seen = set()
+    product_question = re.search(r"product|fund|\betf|invest|\bstock|\bqqq\b|\bspy\b|\bgld\b|\bvti\b", user_text, re.I)
+    limit = 7 if product_question else 4
+    def mentioned_products(text):
+        matches = []
+        for product_id, ticker in PRODUCTS.items():
+            match = re.search(r"(?<![A-Za-z0-9])" + re.escape(ticker) + r"(?![A-Za-z0-9])", text, re.I)
+            if match:
+                matches.append((match.start(), product_id))
+        return [product_id for _, product_id in sorted(matches)]
     def add(kind, item_id, amount=None):
-        if not isinstance(kind, str) or not isinstance(item_id, str) or (kind, item_id) in seen or len(actions) >= 4:
+        if not isinstance(kind, str) or not isinstance(item_id, str) or (kind, item_id) in seen or len(actions) >= limit:
             return
         if kind == "page" and item_id in PAGES:
             path, label, description, icon = PAGES[item_id]
@@ -88,10 +98,9 @@ def resolve_actions(suggestions, user_text, reply):
         actions.append(action)
 
     # Explicit product requests take priority over more general suggestions.
-    for product_id, ticker in PRODUCTS.items():
-        if re.search(r"(?<![A-Za-z0-9])" + re.escape(ticker) + r"(?![A-Za-z0-9])", user_text, re.I):
-            matching = next((item for item in suggestions if isinstance(item, dict) and item.get("kind") == "product" and item.get("id") == product_id), {}) if isinstance(suggestions, list) else {}
-            add("product", product_id, matching.get("amount"))
+    for product_id in mentioned_products(user_text):
+        matching = next((item for item in suggestions if isinstance(item, dict) and item.get("kind") == "product" and item.get("id") == product_id), {}) if isinstance(suggestions, list) else {}
+        add("product", product_id, matching.get("amount"))
 
     if isinstance(suggestions, list):
         for suggestion in suggestions[:12]:
@@ -104,13 +113,11 @@ def resolve_actions(suggestions, user_text, reply):
                 add(kind, item_id, suggestion.get("amount"))
 
     # Only surface products from the reply when the user is asking about investments.
-    product_question = re.search(r"product|fund|\betf|invest|\bstock|\bqqq\b|\bspy\b|\bgld\b|\bvti\b", user_text, re.I)
     if product_question:
-        for product_id, ticker in PRODUCTS.items():
-            if re.search(r"(?<![A-Za-z0-9])" + re.escape(ticker) + r"(?![A-Za-z0-9])", reply, re.I):
-                add("product", product_id)
-                if len(actions) >= 3:
-                    break
+        for product_id in mentioned_products(reply):
+            add("product", product_id)
+            if sum('query' in action for action in actions) >= 6:
+                break
 
     for page_id, pattern in GUIDE_PATTERNS:
         if re.search(pattern, user_text, re.I):
@@ -133,7 +140,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=24)
 
-BASE_SYSTEM = """You are aku-bank's helpful banking demo assistant. Respond only in English, accurately and concisely. You are a conversational AI, not a person. You can answer general banking and investment questions, explain how to use this app, and suggest navigating to its pages. Do not claim to have accessed account balances, holdings, prices, live market data, or to have placed transactions: you have not. Never ask for passwords, card numbers, API keys, or other secrets. Do not promise returns or present historical returns as guaranteed. For investments explain relevant risks and avoid pretending to know the user's risk profile. If asked to execute a transaction, explain the user must review and confirm it in the app. You cannot execute it. The app's transfer status page shows transfer orders, not all investment orders; the cards page shows demo debit and linked cards, not a comprehensive credit-card account. Distinguish these capabilities when directing customers. The app's demo fund catalogue contains QQQ (Nasdaq 100), SPY (S&P 500), VTI (US total market), GLD (gold), TLT (long-term US Treasuries), and IBB (biotech). This list is illustrative, not personalized advice; ask about the user's goals and risk tolerance before recommending. Do not invent current prices or returns. The user must review all information before any purchase."""
+BASE_SYSTEM = """You are aku-bank's helpful banking assistant in a simulated environment. Respond only in English, accurately and concisely, and avoid using the word demo. If asked whether transactions or data are real, explain honestly that they are simulated. You are a conversational AI, not a person. You can answer general banking and investment questions, explain how to use this app, and suggest navigating to its pages. Do not claim to have accessed account balances, holdings, prices, live market data, or to have placed transactions: you have not. Never ask for passwords, card numbers, API keys, or other secrets. Do not promise returns or present historical returns as guaranteed. For investments explain relevant risks and avoid pretending to know the user's risk profile. If asked to execute a transaction, explain the user must review and confirm it in the app. You cannot execute it. The app's transfer status page shows transfer orders, not all investment orders; the cards page shows simulated debit and linked cards, not a comprehensive credit-card account. Distinguish these capabilities when directing customers. The available fund catalogue contains QQQ (Nasdaq 100), SPY (S&P 500), VTI (US total market), GLD (gold), TLT (long-term US Treasuries), and IBB (biotech). This list is illustrative, not personalized advice; ask about the user's goals and risk tolerance before recommending. Do not invent current prices or returns. The user must review all information before any purchase."""
+STREAM_SYSTEM = BASE_SYSTEM + """ Give a helpful concise answer in Markdown. For a request for portfolio ideas, ask about risk tolerance and investment horizon, and briefly describe two or three relevant example products from the catalogue as illustrative options, not personalized advice. Name their tickers accurately so customers can explore them. Do not suggest percentages or claim that any product is suitable without knowing the customer's circumstances. Do not imply that you can see account data, execute a purchase, or guarantee returns."""
 SYSTEM = BASE_SYSTEM + """ Act as a helpful concierge: answer the question and suggest up to four relevant next steps in the app. Return a valid JSON object with exactly these keys: reply (string), actions (array of objects). Each action must be either {"kind":"page","id":"PAGE_ID"} or {"kind":"product","id":"PRODUCT_ID"}. Available page IDs: account (account overview and balances), mine (account center), wealth (wealth products), funds (fund catalogue), transfer (transfer options), transfer_in (add funds), transactions (account transaction history), orders (transfer status, not investment orders), cards, loans, security, holdings, fx, bills, payees, schedule (scheduled transfers), kyc, pay, points, notices, rights. Valid product IDs: f1 IBB, f2 QQQ, f3 VIG, f4 SPY, f5 XLK, f6 XLV, f7 GLD, f8 TLT, f9 ARKK, f10 VTI, f11 ASEA, f12 EWS, f13 EWM, f14 EIDO, f15 THD, f16 VNM, f17 EPHE. Only recommend products mentioned in the answer or request; do not invent products, claim to know suitability, prices, returns, account data or transaction status. If a specific product was requested, include its product action. For product discovery suggest relevant example product actions and the funds or wealth page. For order and account questions offer the matching pages. Do not mention navigation buttons unless you have included corresponding actions. Return actions: [] for unrelated questions. Never execute or claim to have executed transactions. Do not put markdown fences around JSON."""
 
 async def completion(client, payload, key):
@@ -150,6 +158,103 @@ async def completion(client, payload, key):
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Empty model response")
     return content.strip()
+
+
+def sse_event(kind, **values):
+    return f"data: {json.dumps({'type': kind, **values}, ensure_ascii=False)}\n\n"
+
+
+def presentable_text(text):
+    return re.sub(r"\bdemo\b", lambda match: "Example" if match.group()[0].isupper() else "example", text, flags=re.I)
+
+
+class StreamingTextFilter:
+    """Keep a trailing word until its boundary so split tokens are handled safely."""
+    def __init__(self):
+        self.pending = ""
+
+    def feed(self, text, final=False):
+        self.pending += text
+        match = None if final else re.search(r"[^\W\d_]+$", self.pending)
+        boundary = match.start() if match else len(self.pending)
+        result, self.pending = self.pending[:boundary], self.pending[boundary:]
+        return presentable_text(result)
+
+
+@router.post("/api/assistant/chat/stream")
+async def chat_stream(body: ChatRequest, authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Please sign in again.")
+    try:
+        decode_token(authorization.split(" ", 1)[1], secret=os.environ.get("JWT_SECRET", ""))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Please sign in again.")
+    if body.messages[-1].role != "user":
+        raise HTTPException(status_code=422, detail="The last message must be from the user.")
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="The assistant is not configured.")
+    payload = {
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"),
+        "messages": [{"role": "system", "content": STREAM_SYSTEM}] + [m.model_dump() for m in body.messages],
+        "thinking": {"type": "disabled"},
+        "stream": True,
+        "max_tokens": 1600,
+    }
+
+    async def events():
+        parts = []
+        text_filter = StreamingTextFilter()
+        finish_reason = None
+        saw_done = False
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10)) as client:
+                async with client.stream("POST", "https://api.deepseek.com/chat/completions", json=payload,
+                                         headers={"Authorization": f"Bearer {key}"}) as response:
+                    if response.status_code in (401, 402, 429):
+                        error_messages = {401: "DeepSeek API key was rejected.", 402: "DeepSeek account has insufficient balance.", 429: "DeepSeek is busy. Please try again shortly."}
+                        yield sse_event("error", message=error_messages[response.status_code])
+                        return
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            saw_done = True
+                            break
+                        if not data:
+                            continue
+                        chunk = json.loads(data)
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+                        delta = choice.get("delta") or {}
+                        text = delta.get("content")
+                        if isinstance(text, str) and text:
+                            visible = text_filter.feed(text)
+                            if visible:
+                                parts.append(visible)
+                                yield sse_event("delta", text=visible)
+            remaining = text_filter.feed("", final=True)
+            if remaining:
+                parts.append(remaining)
+                yield sse_event("delta", text=remaining)
+            reply = "".join(parts)
+            if not saw_done or finish_reason != "stop" or not reply.strip():
+                raise ValueError("Incomplete streamed response")
+            yield sse_event("actions", actions=resolve_actions([], guide_context(body.messages), reply))
+            yield sse_event("done")
+        except httpx.TimeoutException:
+            yield sse_event("error", message="DeepSeek timed out. Please try again.")
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+            logger.warning("DeepSeek streaming request failed or was incomplete")
+            yield sse_event("error", message="The assistant could not complete its response. Please try again.")
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
 @router.post("/api/assistant/chat")
 async def chat(body: ChatRequest, authorization: str | None = Header(default=None)):
@@ -184,10 +289,10 @@ async def chat(body: ChatRequest, authorization: str | None = Header(default=Non
                 fallback = dict(payload)
                 fallback.pop("response_format")
                 fallback["messages"] = [{"role": "system", "content": BASE_SYSTEM + " Reply in plain text."}] + [m.model_dump() for m in body.messages]
-                reply = await completion(client, fallback, key)
+                reply = presentable_text(await completion(client, fallback, key))
                 actions = resolve_actions([], guide_context(body.messages), reply)
                 return {"reply": reply, "actions": actions, "action": actions[0] if actions else None}
-        reply = answer["reply"]
+        reply = presentable_text(answer["reply"])
         suggestions = answer.get("actions", [])
         if not isinstance(suggestions, list):
             suggestions = []

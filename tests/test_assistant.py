@@ -38,6 +38,27 @@ class FallbackClient(FakeClient):
         self.requests.append(kwargs['json'])
         return RawResponse('   ' if len(self.requests) == 1 else 'Here are some example funds.')
 
+class FakeStreamResponse:
+    status_code = 200
+    lines = [
+        'data: {"choices":[{"delta":{"content":"QQQ "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"is a fund."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+    ]
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    def raise_for_status(self): pass
+    async def aiter_lines(self):
+        for line in self.lines:
+            yield line
+
+class FakeStreamClient(FakeClient):
+    payload = None
+    def stream(self, method, url, **kwargs):
+        FakeStreamClient.payload = kwargs['json']
+        return FakeStreamResponse()
+
 class AssistantTest(unittest.TestCase):
     def test_auth_required(self):
         r = client.post('/api/assistant/chat', json={'messages': [{'role': 'user', 'content': 'hi'}]})
@@ -81,6 +102,14 @@ class AssistantTest(unittest.TestCase):
         actions = resolve_actions([], 'What funds can I explore?', 'You can compare QQQ and SPY.')
         self.assertEqual([item['query']['id'] for item in actions if 'query' in item], ['f2', 'f4'])
         self.assertIn('/funds', [item['path'] for item in actions])
+    def test_portfolio_ideas_do_not_claim_to_open_existing_holdings(self):
+        actions = resolve_actions([], 'I want an investment portfolio', 'Consider QQQ and TLT.')
+        self.assertNotIn('/holdings', [item['path'] for item in actions])
+        self.assertEqual([item['query']['id'] for item in actions if 'query' in item], ['f2', 'f8'])
+    def test_recommended_product_order_matches_the_answer(self):
+        actions = resolve_actions([], 'Suggest investment products', 'Consider SPY, QQQ, VTI, GLD, TLT, and IBB.')
+        self.assertEqual([item['query']['id'] for item in actions if 'query' in item], ['f4', 'f2', 'f10', 'f7', 'f8', 'f1'])
+        self.assertIn('/funds', [item['path'] for item in actions])
     def test_untrusted_actions_and_unstated_amount_are_discarded(self):
         actions = resolve_actions([
             {'kind': 'product', 'id': 'f2', 'amount': 500},
@@ -96,5 +125,42 @@ class AssistantTest(unittest.TestCase):
                     ChatMessage(role='user', content='Open them')]
         actions = resolve_actions([], guide_context(messages), 'Here is transfer status.')
         self.assertEqual(actions[0]['path'], '/orders')
+    @patch('assistant.httpx.AsyncClient', FakeStreamClient)
+    def test_stream_delivers_deltas_then_validated_actions(self):
+        r = client.post('/api/assistant/chat/stream', headers=AUTH, json={'messages': [{'role': 'user', 'content': 'Tell me about QQQ'}]})
+        self.assertEqual(r.status_code, 200)
+        events = [json.loads(line[6:]) for line in r.text.splitlines() if line.startswith('data: ')]
+        self.assertEqual([event['type'] for event in events], ['delta', 'delta', 'actions', 'done'])
+        self.assertEqual(''.join(event['text'] for event in events if event['type'] == 'delta'), 'QQQ is a fund.')
+        self.assertEqual(events[2]['actions'][0]['query']['id'], 'f2')
+        self.assertEqual(r.headers['x-accel-buffering'], 'no')
+        self.assertTrue(FakeStreamClient.payload['stream'])
+        self.assertNotIn('response_format', FakeStreamClient.payload)
+    @patch('assistant.httpx.AsyncClient', FakeStreamClient)
+    def test_interrupted_stream_reports_error_instead_of_completion(self):
+        with patch.object(FakeStreamResponse, 'lines', ['data: {"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}']):
+            r = client.post('/api/assistant/chat/stream', headers=AUTH, json={'messages': [{'role': 'user', 'content': 'Hello'}]})
+        events = [json.loads(line[6:]) for line in r.text.splitlines() if line.startswith('data: ')]
+        self.assertEqual([event['type'] for event in events], ['delta', 'error'])
+    @patch('assistant.httpx.AsyncClient', FakeStreamClient)
+    def test_stream_filters_keyword_across_chunks_without_changing_other_words(self):
+        lines = [
+            'data: {"choices":[{"delta":{"content":"This de"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"mo includes a demonstration."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            'data: [DONE]',
+        ]
+        with patch.object(FakeStreamResponse, 'lines', lines):
+            r = client.post('/api/assistant/chat/stream', headers=AUTH, json={'messages': [{'role': 'user', 'content': 'hello'}]})
+        events = [json.loads(line[6:]) for line in r.text.splitlines() if line.startswith('data: ')]
+        self.assertEqual(''.join(event['text'] for event in events if event['type'] == 'delta'), 'This example includes a demonstration.')
+    @patch('assistant.httpx.AsyncClient', FakeClient)
+    def test_non_streaming_reply_omits_keyword(self):
+        with patch.object(FakeClient, 'response', FakeResponse({'reply': 'This demo uses simulated data.', 'actions': []})):
+            r = client.post('/api/assistant/chat', headers=AUTH, json={'messages': [{'role': 'user', 'content': 'hello'}]})
+        self.assertEqual(r.json()['reply'], 'This example uses simulated data.')
+    def test_stream_auth_required(self):
+        r = client.post('/api/assistant/chat/stream', json={'messages': [{'role': 'user', 'content': 'hello'}]})
+        self.assertEqual(r.status_code, 401)
 
 if __name__ == '__main__': unittest.main()
