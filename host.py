@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from assistant import router as assistant_router
 
 from bank_common import ErrorCode, decode_token, fail
 
@@ -56,6 +57,7 @@ def build():
         load_service("bff_admin"),
     ]
     app = FastAPI(title="digital-bank-backend")
+    app.include_router(assistant_router)
 
     @app.get("/health")
     def health():
