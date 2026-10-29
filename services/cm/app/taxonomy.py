@@ -201,6 +201,12 @@ CASE_TYPES = [
     "OPS_SUB_18",
     "OPS_SUB_19",
     "OPS_SUB_20",
+    "FEEDBACK_SUB_01",
+    "FEEDBACK_SUB_02",
+    "FEEDBACK_SUB_03",
+    "FEEDBACK_SUB_04",
+    "FEEDBACK_SUB_05",
+    "FEEDBACK_SUB_06",
 ]
 
 PRIORITIES = ["P1", "P2", "P3", "P4"]

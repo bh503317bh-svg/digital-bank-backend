@@ -18,7 +18,7 @@ class CmStore:
         with self._lock:
             return self.cases.get(case_id)
 
-    def list_cases(self, status=None, priority=None, user_id=None, customer_id=None):
+    def list_cases(self, status=None, priority=None, user_id=None, customer_id=None, case_type=None):
         with self._lock:
             rows = list(self.cases.values())
         if status:
@@ -29,6 +29,8 @@ class CmStore:
             rows = [r for r in rows if r.user_id == user_id]
         if customer_id is not None:
             rows = [r for r in rows if r.customer_id == customer_id]
+        if case_type:
+            rows = [r for r in rows if r.case_type == case_type]
         rows.sort(key=lambda x: x.created_at, reverse=True)
         return rows
 

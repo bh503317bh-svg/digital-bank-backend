@@ -43,12 +43,12 @@ def create_case(body: CreateCaseReq, authorization: str | None = Header(default=
     return ok(c.to_dict())
 
 @app.get("/api/cm/cases")
-def list_cases(authorization: str | None = Header(default=None), status: str | None = None, priority: str | None = None):
+def list_cases(authorization: str | None = Header(default=None), status: str | None = None, priority: str | None = None, case_type: str | None = None):
     payload = require_user(authorization)
     if is_error(payload):
         return payload
     uid = None if payload.get("role") == "admin" else int(payload["uid"])
-    rows = STORE.list_cases(status=status, priority=priority, user_id=uid)
+    rows = STORE.list_cases(status=status, priority=priority, user_id=uid, case_type=case_type)
     return ok([c.to_dict(include_notes=False) for c in rows])
 
 @app.get("/api/cm/cases/{case_id}")
